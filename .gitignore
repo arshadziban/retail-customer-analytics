@@ -1,0 +1,64 @@
+# =============================================================================
+# retail-customer-analytics
+# Tracked on purpose: sql/*.sql, README.md, Power BI report files
+# (*.pbix / *.pbip).
+# =============================================================================
+
+# ---- Data -------------------------------------------------------------------
+# Source CSVs are kept locally, not in git. Place them in dataset/ before
+# running sql/02_import_csv_data.sql.
+dataset/
+
+# ---- SQL Server / SSMS ------------------------------------------------------
+# Database files and backups: large, binary, rebuilt from the scripts.
+*.mdf
+*.ndf
+*.ldf
+*.bak
+*.trn
+# SSMS / Visual Studio workspace and solution user settings
+.vs/
+*.suo
+*.user
+*.ssmssqlproj.user
+# SQL Server Data Tools build output
+bin/
+obj/
+*.dacpac
+# Query output saved from sqlcmd / SSMS
+*.rpt
+*.log
+output/
+
+# ---- Power BI ---------------------------------------------------------------
+# Keep the report (.pbix or .pbip project); ignore local cache and settings.
+*.pbix.bak
+**/.pbi/localSettings.json
+**/.pbi/cache.abf
+
+# ---- Python (profiling / helper scripts) ------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# ---- Editors ----------------------------------------------------------------
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*~
+
+# ---- OS ---------------------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+$RECYCLE.BIN/
+
+# ---- Secrets / local config -------------------------------------------------
+# Never commit connection strings or credentials.
+.env
+.env.*
+*.publishsettings
