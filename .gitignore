@@ -1,7 +1,6 @@
 # =============================================================================
 # retail-customer-analytics
-# Tracked on purpose: sql/*.sql, README.md, Power BI report files
-# (*.pbix / *.pbip).
+# Tracked on purpose: sql/*.sql, README.md.
 # =============================================================================
 
 # ---- Data -------------------------------------------------------------------
@@ -31,7 +30,8 @@ obj/
 output/
 
 # ---- Power BI ---------------------------------------------------------------
-# Keep the report (.pbix or .pbip project); ignore local cache and settings.
+# Report files are kept locally, not in git; also ignore local cache and settings.
+*.pbix
 *.pbix.bak
 **/.pbi/localSettings.json
 **/.pbi/cache.abf
