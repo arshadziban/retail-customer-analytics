@@ -1,56 +1,10 @@
 /*
-===============================================================================
-Project     : Enterprise Retail Analytics
-Database    : RetailAnalytics
-DBMS        : Microsoft SQL Server
-Script      : 01_create_tables_with_keys.sql
-===============================================================================
-
-MODEL OVERVIEW (star schema, two dimensions + four fact tables)
-
-    dim_customers (1) ----< (N) fact_orders (1) ----< (N) fact_order_items (N) >---- (1) dim_products
-                                     |
-                                     |-- (1:1) fact_payments
-                                     |-- (1:N) fact_returns
-
-GRAIN (one row represents...)
-    dim_customers     one customer
-    dim_products      one product / SKU
-    fact_orders       one order (header level: status, shipping, freight)
-    fact_order_items  one product line within an order (revenue & margin live here)
-    fact_payments     one payment per order (enforced 1:1 via UNIQUE on OrderID)
-    fact_returns      one return event, linked to the ORDER (not to an item)
-
-CONVENTIONS
-    - dim_ / fact_ prefixes make the role of each table obvious to BI users.
-    - IDs are natural business keys (e.g. CUST000001), kept as VARCHAR because
-      they are identifiers, not quantities, and carry a readable prefix.
-    - Money is DECIMAL (never FLOAT) to avoid rounding drift in aggregates.
-    - Every column is NOT NULL: the source data is complete, so we enforce it
-      and let the database reject bad loads instead of hiding them in reports.
-    - Text columns are NVARCHAR with headroom above the longest observed value.
-
-KNOWN ANALYTICAL CAVEATS (read before building metrics)
-    - Returns reference OrderID only, so item-level return rates are not
-      possible without an allocation rule. Analyse returns at order level.
-    - Orders with OrderStatus = 'Cancelled' and payments with
-      PaymentStatus = 'Voided / Refunded' exist in the data. Decide explicitly
-      whether to exclude them from revenue; do not sum LineTotal blindly.
-    - UnitPrice / UnitCost are stored on the order line as well as on the
-      product. The order-line values are the price/cost AT TIME OF SALE and are
-      the ones to use for revenue and margin; dim_products holds the current
-      price list only.
-===============================================================================
+Script  : 01_create_tables_with_keys.sql
+Purpose : Create the database, tables, keys, constraints and indexes.
+          Star schema: 2 dimensions + 4 fact tables. Safe to re-run (skips existing objects).
 */
 
--- =========================================
 -- 1. CREATE DATABASE
--- =========================================
--- Idempotent: every CREATE below is guarded (IF ... IS NULL / NOT EXISTS), so
--- re-running the script skips objects that already exist instead of failing.
--- Note the guard does not ALTER an existing table: to change a column
--- definition, drop and rebuild.
-
 IF DB_ID(N'RetailAnalytics') IS NULL
     CREATE DATABASE RetailAnalytics;
 GO
@@ -58,17 +12,7 @@ GO
 USE RetailAnalytics;
 GO
 
--- =========================================
 -- 2. CUSTOMER DIMENSION
--- =========================================
--- Grain : one row per customer.
--- Use   : slice every fact by acquisition channel, region and loyalty tier
---         (cohort, CAC-by-channel and retention analysis).
--- Note  : SignupDate is stored as DATE (time of day is irrelevant). Do NOT
---         use it as the cohort anchor: 04_data_quality_checks.sql found
---         ~38% of orders dated before the customer's SignupDate. Use the
---         first order date instead.
-
 IF OBJECT_ID(N'dbo.dim_customers', N'U') IS NULL
 CREATE TABLE dbo.dim_customers (
     CustomerID VARCHAR(20) NOT NULL,          -- business key, e.g. CUST000001
@@ -83,16 +27,7 @@ CREATE TABLE dbo.dim_customers (
 );
 GO
 
--- =========================================
 -- 3. PRODUCT DIMENSION
--- =========================================
--- Grain : one row per product (SKU).
--- Use   : category / margin analysis and inventory health.
--- Note  : StockOnHand vs ReorderPoint supports stock-out and overstock
---         monitoring. UnitCost vs UnitPrice gives the list-price margin.
--- Rules : SKU is a second unique identifier; CHECKs block negative prices,
---         costs and stock so bad data fails at load time.
-
 IF OBJECT_ID(N'dbo.dim_products', N'U') IS NULL
 CREATE TABLE dbo.dim_products (
     ProductID VARCHAR(20) NOT NULL,           -- business key, e.g. PROD00001
@@ -124,17 +59,7 @@ CREATE TABLE dbo.dim_products (
 );
 GO
 
--- =========================================
 -- 4. ORDER FACT TABLE
--- =========================================
--- Grain : one row per order (header).
--- Use   : order volume, fulfilment status mix, shipping-method mix,
---         customer purchase frequency and recency.
--- Note  : Revenue is NOT stored here; it is the sum of fact_order_items.
---         Freight is an order-level cost, so it must be counted once per
---         order. Joining to items and summing FreightCost will multiply it.
--- Time  : DATETIME2(0) = second precision, matching the source data.
-
 IF OBJECT_ID(N'dbo.fact_orders', N'U') IS NULL
 CREATE TABLE dbo.fact_orders (
     OrderID VARCHAR(20) NOT NULL,             -- business key, e.g. ORD0000001
@@ -156,22 +81,7 @@ CREATE TABLE dbo.fact_orders (
 );
 GO
 
--- =========================================
 -- 5. ORDER ITEMS FACT TABLE
--- =========================================
--- Grain : one row per product line within an order. This is the core
---         revenue and margin table; most KPIs start here.
--- Note  : Price and cost are snapshotted on the line (see caveats above).
---         The measures are stored pre-computed in the source:
---             DiscountAmount = Quantity * UnitPrice * DiscountRate
---             LineTotal      = Quantity * UnitPrice - DiscountAmount
---             ItemNetMargin  = LineTotal - Quantity * UnitCost
---         They are kept as stored columns for query speed. Reconcile them
---         against the formulas in data-quality checks.
--- Rules : DiscountRate is a fraction (0.05 = 5%), hence DECIMAL(6,4) with a
---         0..1 check. Quantity must be positive. ItemNetMargin has no CHECK
---         on purpose: a line sold below cost can legitimately go negative.
-
 IF OBJECT_ID(N'dbo.fact_order_items', N'U') IS NULL
 CREATE TABLE dbo.fact_order_items (
     OrderItemID VARCHAR(20) NOT NULL,         -- business key, e.g. ITEM00000001
@@ -216,16 +126,7 @@ CREATE TABLE dbo.fact_order_items (
 );
 GO
 
--- =========================================
 -- 6. PAYMENTS FACT TABLE
--- =========================================
--- Grain : one payment per order.
--- Use   : payment-method mix, processing-fee cost, failed / voided payments.
--- Rules : UNIQUE(OrderID) enforces the 1:1 relationship with fact_orders, so
---         joining orders to payments cannot duplicate order rows.
--- Note  : ProcessingFee is a cost to the business (gateway fee). Deduct it
---         when calculating contribution margin per order.
-
 IF OBJECT_ID(N'dbo.fact_payments', N'U') IS NULL
 CREATE TABLE dbo.fact_payments (
     PaymentID VARCHAR(20) NOT NULL,           -- business key, e.g. PAY0000001
@@ -253,19 +154,7 @@ CREATE TABLE dbo.fact_payments (
 );
 GO
 
--- =========================================
 -- 7. RETURNS FACT TABLE
--- =========================================
--- Grain : one row per return event, at ORDER level (no item reference).
--- Use   : return rate, return-reason analysis, refund and restocking cost.
--- Note  : Agree the treatment of RestockingFee (income retained vs. offset
---         against RefundAmount) with Finance before reporting net refunds.
---         Only 'Processed & Refunded' is a completed cash refund;
---         'Inspection Pending' is an open liability, not a final figure.
--- Rules : an order can have several returns (about 2.5k orders do), so there
---         is deliberately no UNIQUE on OrderID (contrast with fact_payments).
---         Count DISTINCT OrderID when calculating the order return rate.
-
 IF OBJECT_ID(N'dbo.fact_returns', N'U') IS NULL
 CREATE TABLE dbo.fact_returns (
     ReturnID VARCHAR(20) NOT NULL,            -- business key, e.g. RET000001
@@ -291,45 +180,28 @@ CREATE TABLE dbo.fact_returns (
 );
 GO
 
--- =========================================
 -- 8. CREATE INDEXES
--- =========================================
--- Primary and unique keys are already indexed by SQL Server. These cover the
--- foreign-key join paths that analytical queries hit most. SQL Server does
--- NOT create an index on a foreign key automatically.
---   fact_payments.OrderID is already covered by UQ_fact_payments_OrderID.
-
--- Customer history queries: orders per customer ordered by time
--- (recency, frequency, cohort and repeat-purchase analysis).
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_fact_orders_CustomerID_OrderTimestamp')
 CREATE INDEX IX_fact_orders_CustomerID_OrderTimestamp
     ON dbo.fact_orders(CustomerID, OrderTimestamp);
 GO
 
--- Order -> its lines (revenue and margin rolled up to order level).
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_fact_order_items_OrderID')
 CREATE INDEX IX_fact_order_items_OrderID
     ON dbo.fact_order_items(OrderID);
 GO
 
--- Product -> its sales (product and category performance).
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_fact_order_items_ProductID')
 CREATE INDEX IX_fact_order_items_ProductID
     ON dbo.fact_order_items(ProductID);
 GO
 
--- Order -> its returns (return-rate calculations).
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_fact_returns_OrderID')
 CREATE INDEX IX_fact_returns_OrderID
     ON dbo.fact_returns(OrderID);
 GO
 
--- =========================================
 -- 9. VERIFY TABLE CREATION
--- =========================================
--- Expect 6 base tables: dim_customers, dim_products, fact_orders,
--- fact_order_items, fact_payments, fact_returns.
-
 SELECT
     TABLE_SCHEMA,
     TABLE_NAME

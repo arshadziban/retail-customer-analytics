@@ -1,51 +1,13 @@
 /*
-===============================================================================
-Project     : Enterprise Retail Analytics
-Database    : RetailAnalytics
-DBMS        : Microsoft SQL Server
-Script      : 09_create_analytical_views.sql
-Purpose     : Publish the analysis logic from 05-08 as reusable views, so
-              Power BI (and anyone else) reads one governed definition of
-              each metric instead of re-implementing it.
-Run after   : 05-08 (the logic below mirrors those scripts)
-===============================================================================
-
-VIEWS
-    vw_order_summary          one row per order. The base layer: revenue,
-                              margin, costs, payment and return measures all
-                              at ORDER grain. Most other views build on it.
-    vw_sales_monthly          one row per order month: sales KPIs + returns.
-    vw_customer_rfm           one row per purchasing customer: RFM scores
-                              and segment (same rules as 06).
-    vw_product_profitability  one row per product: sales, margin, stock status.
-    vw_payment_summary        one row per order month x method x status.
-    vw_returns_summary        one row per return month x reason x status.
-
-DESIGN RULES
-    - Every view repeats the metric definitions from 05 (qualifying order =
-      not Cancelled; net sales = SUM(LineTotal); refunds capped at order value).
-      If a rule changes, change it here AND in the matching analysis script.
-    - Views expose ADDITIVE components (sums and counts) alongside ratios.
-      In Power BI, build ratios as measures from the components, e.g.
-      DIVIDE(SUM(ItemMargin), SUM(NetSales)). Averaging a pre-computed
-      percentage across rows gives the wrong answer.
-    - No ORDER BY inside views (SQL Server ignores it); sort in the report.
-    - CREATE OR ALTER makes the script safe to re-run (SQL Server 2016 SP1+).
-    - Dates are relative to the data (last order), not GETDATE(), so results
-      are stable for a historical extract.
-===============================================================================
+Script  : 09_create_analytical_views.sql
+Purpose : Summary views, one per analysis topic.
+          Pre-aggregated, so they cannot be joined in Power BI. Use the pbi_ views (10) for the model.
 */
 
 USE RetailAnalytics;
 GO
 
--- =========================================
 -- 1. vw_order_summary  (grain: one row per order)
--- =========================================
--- The single place where lines, payments and returns are rolled up to the
--- order. Every child table is aggregated BEFORE the join, so no amount is
--- ever duplicated. Includes cancelled orders; filter on IsQualifying.
-
 CREATE OR ALTER VIEW dbo.vw_order_summary
 AS
 SELECT
@@ -61,10 +23,10 @@ SELECT
     c.Region,
     c.AcquisitionChannel,
     c.LoyaltyTier,
+    p.PaymentID,
     p.PaymentMethod,
     p.PaymentStatus,
 
-    -- Line measures
     li.LineCount,
     li.Units,
     li.GrossSales,
@@ -72,13 +34,11 @@ SELECT
     li.NetSales,
     li.ItemMargin,
 
-    -- Order-level costs (absorbed by the business, not charged to customer)
     o.FreightCost,
     ISNULL(p.ProcessingFee, 0)                                      AS ProcessingFee,
     li.ItemMargin - o.FreightCost - ISNULL(p.ProcessingFee, 0)      AS Contribution,
     ISNULL(p.TotalAmountPaid, 0)                                    AS AmountPaid,
 
-    -- Return measures (refund capped at order value, see 08)
     CASE WHEN r.OrderID IS NOT NULL THEN 1 ELSE 0 END               AS HasReturn,
     ISNULL(r.ReturnRecords, 0)                                      AS ReturnRecords,
     ISNULL(r.RefundRaw, 0)                                          AS RefundRaw,
@@ -111,13 +71,7 @@ LEFT JOIN (
 ) r ON r.OrderID = o.OrderID;
 GO
 
--- =========================================
 -- 2. vw_sales_monthly  (grain: one row per order month)
--- =========================================
--- Executive trend view. Revenue columns are qualifying orders only; return
--- columns use delivered orders as the base (same rules as 05 and 08).
--- Return figures for the latest months are incomplete (window still open).
-
 CREATE OR ALTER VIEW dbo.vw_sales_monthly
 AS
 SELECT
@@ -146,7 +100,6 @@ SELECT
     SUM(RefundCapped)                                               AS RefundCapped,
     SUM(RefundRaw)                                                  AS RefundRaw,
 
-    -- Convenience ratios for this grain only (do not average across months).
     CAST(SUM(CASE WHEN IsQualifying = 1 THEN NetSales ELSE 0 END)
          / NULLIF(SUM(IsQualifying), 0) AS DECIMAL(12,2))           AS AvgOrderValue,
     CAST(100.0 * SUM(CASE WHEN IsQualifying = 1 THEN ItemMargin ELSE 0 END)
@@ -157,12 +110,7 @@ FROM dbo.vw_order_summary
 GROUP BY OrderMonth;
 GO
 
--- =========================================
 -- 3. vw_customer_rfm  (grain: one row per purchasing customer)
--- =========================================
--- Same scoring and segment rules as 06 (see that header for the reasoning).
--- Customers with no qualifying order are not included.
-
 CREATE OR ALTER VIEW dbo.vw_customer_rfm
 AS
 WITH as_of AS (
@@ -217,7 +165,6 @@ SELECT
         WHEN s.R_Score <= 2 AND s.F_Score >= 3 THEN 'At Risk'
         ELSE                                        'Hibernating'
     END                                             AS Segment,
-    -- Sort key so Power BI shows segments best-to-worst, not alphabetically.
     CASE
         WHEN s.R_Score >= 4 AND s.F_Score >= 4 THEN 1
         WHEN s.R_Score >= 3 AND s.F_Score >= 3 THEN 2
@@ -230,13 +177,7 @@ FROM scored s
 JOIN dbo.dim_customers c ON c.CustomerID = s.CustomerID;
 GO
 
--- =========================================
 -- 4. vw_product_profitability  (grain: one row per product)
--- =========================================
--- All catalogue products, including never-sold ones (zeros, not missing).
--- Item margin only: freight and fees are not allocated to products (see 07).
--- StockStatus uses the same rules and 90-day demand window as 07.
-
 CREATE OR ALTER VIEW dbo.vw_product_profitability
 AS
 WITH last_order AS (
@@ -304,12 +245,7 @@ SELECT
 FROM base;
 GO
 
--- =========================================
 -- 5. vw_payment_summary  (grain: order month x payment method x status)
--- =========================================
--- Small, additive table for payment KPIs. Success rate and fee rate are
--- built as measures in Power BI from the counts and sums below.
-
 CREATE OR ALTER VIEW dbo.vw_payment_summary
 AS
 SELECT
@@ -328,15 +264,7 @@ GROUP BY
     p.PaymentStatus;
 GO
 
--- =========================================
 -- 6. vw_returns_summary  (grain: return month x reason x status)
--- =========================================
--- Return VOLUME and COST by when they were logged, why, and how far along
--- they are. Return RATES need an order denominator and live in
--- vw_sales_monthly (by order month), so the two views answer different
--- questions and should not be mixed in one visual.
--- RefundCapped: each return's share of its order's capped refund (see 08).
-
 CREATE OR ALTER VIEW dbo.vw_returns_summary
 AS
 WITH order_refund AS (
@@ -380,12 +308,7 @@ FROM return_lines
 GROUP BY ReturnMonth, ReturnReason, ReturnStatus;
 GO
 
--- =========================================
 -- 7. VERIFY VIEWS AND RECONCILE TO SOURCE
--- =========================================
--- Views exist, and their totals tie back to the base tables. If any
--- Difference is non-zero, a view is double counting or dropping rows.
-
 SELECT name AS ViewName, create_date, modify_date
 FROM sys.views
 WHERE name IN ('vw_order_summary', 'vw_sales_monthly', 'vw_customer_rfm',

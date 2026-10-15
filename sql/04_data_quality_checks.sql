@@ -1,36 +1,7 @@
 /*
-===============================================================================
-Project     : Enterprise Retail Analytics
-Database    : RetailAnalytics
-DBMS        : Microsoft SQL Server
-Script      : 04_data_quality_checks.sql
-Purpose     : Find missing, inconsistent or suspicious values BEFORE they
-              reach a KPI. 03 proved the data is structurally sound; this
-              script asks whether it is believable.
-Run after   : 03_validate_keys_and_rows.sql
-Run before  : 05_sales_analysis.sql
-===============================================================================
-
-APPROACH
-    - Every check writes one row to #dq_results: what was tested, how many
-      rows are affected, severity, and what to do about it.
-    - Severity:
-        HIGH   : changes a headline KPI if ignored. Must have a documented rule.
-        MEDIUM : affects a specific analysis; handle where that analysis runs.
-        LOW    : cosmetic or informational.
-        OK     : check ran and found nothing.
-    - Section 9 returns sample rows for the issues that need investigation.
-
-GOVERNANCE RULE
-    This script is READ-ONLY. Nothing is deleted or "fixed" here. Suspicious
-    records may be valid business cases (a return weeks after delivery, a
-    zero-freight promotion). Decide the treatment, document it, and apply it
-    in the analysis layer (05-09) where it is visible and reversible.
-
-TOLERANCE
-    Money comparisons allow 0.01 per row (or per order) for rounding, because
-    the source stores pre-rounded line values.
-===============================================================================
+Script  : 04_data_quality_checks.sql
+Purpose : Data quality checks, ranked HIGH / MEDIUM / LOW.
+          Read-only: nothing is deleted. Money tolerance = 0.01.
 */
 
 USE RetailAnalytics;
@@ -50,15 +21,7 @@ CREATE TABLE #dq_results (
     Recommendation VARCHAR(400)
 );
 
--- Helper rule used throughout: if RowsAffected = 0 the severity becomes OK,
--- so the report only shouts about real problems.
-
--- =========================================
 -- 1. MISSING VALUES
--- =========================================
--- Columns are NOT NULL, so true NULLs are impossible. The realistic risk is
--- blank or whitespace-only text that passed the NOT NULL constraint.
-
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Missing values', m.CheckName, m.Affected, m.Checked,
        CASE WHEN m.Affected = 0 THEN 'OK' ELSE 'MEDIUM' END,
@@ -96,13 +59,7 @@ FROM (
     FROM dbo.fact_returns
 ) AS m;
 
--- =========================================
 -- 2. UNEXPECTED CATEGORY VALUES (domain checks)
--- =========================================
--- Any value outside the agreed list would silently fall out of every
--- CASE / filter in the analysis scripts. Allowed lists reflect the values
--- profiled in the source data; extend them deliberately, never implicitly.
-
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Domain values', d.CheckName, d.Affected, d.Checked,
        CASE WHEN d.Affected = 0 THEN 'OK' ELSE 'HIGH' END,
@@ -129,12 +86,7 @@ FROM (
     FROM dbo.dim_customers
 ) AS d;
 
--- =========================================
 -- 3. DATE AND TIMELINE LOGIC
--- =========================================
--- Types guarantee valid dates; these test whether the SEQUENCE of events
--- makes business sense.
-
 -- 3a. Orders placed before the customer signed up.
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Timeline', 'Orders placed before customer SignupDate',
@@ -175,8 +127,6 @@ FROM (
 ) AS f;
 
 -- 3d. Returns logged after the order data ends. Not wrong (returns lag the
--- sale), but it means the return window for late orders is still open, which
--- understates return rates for the most recent months.
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Timeline', 'Returns dated after the last order in the dataset (info)',
        SUM(CASE WHEN r.ReturnTimestamp > x.LastOrder THEN 1 ELSE 0 END),
@@ -186,13 +136,7 @@ SELECT 'Timeline', 'Returns dated after the last order in the dataset (info)',
 FROM dbo.fact_returns r
 CROSS JOIN (SELECT MAX(OrderTimestamp) AS LastOrder FROM dbo.fact_orders) x;
 
--- =========================================
 -- 4. NEGATIVE OR ZERO VALUES
--- =========================================
--- CHECK constraints already block negatives when trusted (see 03). Re-tested
--- here on the data itself, plus zero values that pass the constraints but are
--- commercially suspicious.
-
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Negative / zero', n.CheckName, n.Affected, n.Checked,
        CASE WHEN n.Affected = 0 THEN 'OK' ELSE n.Sev END,
@@ -232,12 +176,8 @@ FROM (
            'HIGH', 'Should be impossible with trusted constraints; correct at source.'
 ) AS n;
 
--- =========================================
 -- 5. DISCOUNTS AND PRICING
--- =========================================
-
 -- 5a. Discount rate outside the standard tiers. The source uses fixed tiers
--- (0%, 5%, 10%, 15%, 20%); anything else suggests a manual override.
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Discounts', 'DiscountRate outside standard tiers (0/5/10/15/20%)',
        SUM(CASE WHEN DiscountRate NOT IN (0.00, 0.05, 0.10, 0.15, 0.20) THEN 1 ELSE 0 END),
@@ -256,8 +196,6 @@ SELECT 'Discounts', 'DiscountRate above 50%',
 FROM dbo.fact_order_items;
 
 -- 5c. Selling price differs from current list price. Expected over time
--- (price changes), so informational, but it tells us whether dim_products
--- prices can stand in for historical prices. Answer: always use line price.
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Discounts', 'Line UnitPrice differs from product list price (info)',
        SUM(CASE WHEN i.UnitPrice <> p.UnitPrice THEN 1 ELSE 0 END),
@@ -267,15 +205,7 @@ SELECT 'Discounts', 'Line UnitPrice differs from product list price (info)',
 FROM dbo.fact_order_items i
 JOIN dbo.dim_products     p ON p.ProductID = i.ProductID;
 
--- =========================================
 -- 6. DERIVED-COLUMN RECONCILIATION
--- =========================================
--- The source ships pre-computed measures. If they disagree with their own
--- formula, every revenue and margin KPI inherits the error.
---   DiscountAmount = Quantity * UnitPrice * DiscountRate
---   LineTotal      = Quantity * UnitPrice - DiscountAmount
---   ItemNetMargin  = LineTotal - Quantity * UnitCost
-
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Reconciliation', r.CheckName, r.Affected, r.Checked,
        CASE WHEN r.Affected = 0 THEN 'OK' ELSE 'HIGH' END,
@@ -297,13 +227,7 @@ FROM (
     FROM dbo.fact_order_items
 ) AS r;
 
--- =========================================
 -- 7. CROSS-TABLE AMOUNT CONSISTENCY
--- =========================================
--- Each table is aggregated to ORDER grain first, then compared. Joining raw
--- lines to payments/returns would repeat the order-level amounts once per
--- line and give wrong answers.
-
 IF OBJECT_ID('tempdb..#order_value') IS NOT NULL DROP TABLE #order_value;
 
 SELECT
@@ -331,8 +255,6 @@ LEFT JOIN (
 ) rt ON rt.OrderID = o.OrderID;
 
 -- 7a. Amount paid vs order item total. Profiling showed TotalAmountPaid
--- equals SUM(LineTotal): freight and processing fee are NOT charged to the
--- customer, they are business costs. This check guards that assumption.
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Consistency', 'TotalAmountPaid <> SUM(LineTotal) for the order',
        SUM(CASE WHEN ABS(TotalAmountPaid - ItemsNet) > 0.01 THEN 1 ELSE 0 END),
@@ -343,7 +265,6 @@ FROM #order_value
 WHERE TotalAmountPaid IS NOT NULL;
 
 -- 7b. Order status and payment status disagree.
--- Expected pairing: Cancelled <-> 'Voided / Refunded', everything else <-> 'Success'.
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Consistency', 'Order status and payment status disagree',
        SUM(CASE WHEN (OrderStatus =  'Cancelled' AND PaymentStatus <> 'Voided / Refunded')
@@ -387,7 +308,6 @@ FROM dbo.fact_returns r
 JOIN #order_value     ov ON ov.OrderID = r.OrderID;
 
 -- 7f. Several returns on one order whose refunds ADD UP to more than the
--- order value. Each return alone looks fine; together they over-refund.
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Consistency', 'Orders whose total refunds exceed order item total',
        SUM(CASE WHEN TotalRefund > ItemsNet + 0.01 THEN 1 ELSE 0 END),
@@ -405,12 +325,7 @@ SELECT 'Consistency', 'RestockingFee greater than RefundAmount',
        'Investigate fee calculation.'
 FROM dbo.fact_returns;
 
--- =========================================
 -- 8. DUPLICATE BUSINESS RECORDS AND OUTLIERS
--- =========================================
--- Unique IDs do not prevent the same real-world event being recorded twice
--- under two IDs. These look for business-level duplicates.
-
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Duplicates', b.CheckName, b.Affected, b.Checked,
        CASE WHEN b.Affected = 0 THEN 'OK' ELSE 'MEDIUM' END,
@@ -434,8 +349,6 @@ FROM (
 ) AS b;
 
 -- 8b. Statistical outliers: order value more than 3 standard deviations above
--- the mean. Not errors by default (B2B or bulk orders exist) but they can
--- dominate averages, so analyses should also report medians.
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Outliers', 'Orders with value > mean + 3 std dev',
        SUM(CASE WHEN ov.ItemsNet > s.MeanVal + 3 * s.StdVal THEN 1 ELSE 0 END),
@@ -446,7 +359,6 @@ FROM #order_value ov
 CROSS JOIN (SELECT AVG(ItemsNet) AS MeanVal, STDEV(ItemsNet) AS StdVal FROM #order_value) s;
 
 -- 8c. Unusually high processing fee rate (fee / amount paid). The typical
--- rate is ~2.4% plus a fixed component, so small orders show higher rates.
 INSERT INTO #dq_results (Area, CheckName, RowsAffected, RowsChecked, Severity, Recommendation)
 SELECT 'Outliers', 'Successful payments with fee rate above 5%',
        SUM(CASE WHEN ProcessingFee > 0.05 * TotalAmountPaid THEN 1 ELSE 0 END),
@@ -465,10 +377,7 @@ SELECT 'Inventory', 'Products at or below ReorderPoint (info)',
        'Snapshot only; no stock-movement history, so historical stock-outs cannot be measured.'
 FROM dbo.dim_products;
 
--- =========================================
 -- 9. DATA QUALITY REPORT
--- =========================================
-
 -- 9a. Full report, most severe first.
 SELECT
     CheckNo,
@@ -490,11 +399,7 @@ FROM #dq_results
 GROUP BY Severity
 ORDER BY CASE Severity WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 3 ELSE 4 END;
 
--- =========================================
 -- 10. SAMPLE ROWS FOR INVESTIGATION
--- =========================================
--- Evidence for the HIGH findings, small enough to paste into a ticket.
-
 -- 10a. Orders before signup: how far before?
 SELECT TOP (20)
     o.OrderID, o.CustomerID, c.SignupDate,

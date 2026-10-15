@@ -1,57 +1,8 @@
 /*
-===============================================================================
-Project     : Enterprise Retail Analytics
-Database    : RetailAnalytics
-DBMS        : Microsoft SQL Server
-Script      : 06_rfm_segmentation.sql
-Purpose     : Segment customers by purchasing behaviour (Recency, Frequency,
-              Monetary) and turn the segments into retention actions.
-Run after   : 05_sales_analysis.sql
-Output      : Customer-level RFM scores and segments, segment economics,
-              and a prioritised retention list.
-===============================================================================
-
-DEFINITIONS
-    Qualifying order : OrderStatus <> 'Cancelled' (same rule as 05).
-    Analysis period  : all qualifying orders in the data
-                       (2024-01-01 to 2025-12-30 at time of writing).
-    As-of date       : the day AFTER the last qualifying order in the data,
-                       NOT GETDATE(). The dataset is a historical extract;
-                       measuring recency from today would make every customer
-                       look lapsed and would change results every time the
-                       script runs.
-    Recency  (R)     : days from the customer's last qualifying order to the
-                       as-of date. Lower = better.
-    Frequency (F)    : number of qualifying orders.
-    Monetary (M)     : SUM(LineTotal) across qualifying orders (net sales).
-
-SCORING (1 = worst, 5 = best)
-    R : NTILE(5) on recency. Quintiles fit because recency is continuous.
-    M : NTILE(5) on monetary, for the same reason.
-    F : FIXED bands, not quintiles: 1, 2, 3, 4, 5+ orders.
-        Most customers have 1-3 orders, so quintiles would split customers
-        with the SAME order count into different scores purely on sort order.
-        Fixed bands keep the score explainable ("F=3 means 3 orders").
-    NTILE ties are broken by CustomerID so results are repeatable.
-
-SEGMENT RULES (evaluated top to bottom; first match wins; every customer
-gets exactly one segment)
-    Champions           R >= 4 AND F >= 4   bought recently and often
-    Loyal Customers     R >= 3 AND F >= 3   regular buyers, still active
-    Potential Loyalists R >= 4 AND F <= 2   recent but few orders: nurture
-    Need Attention      R  = 3 AND F <= 2   middling recency, low frequency
-    At Risk             R <= 2 AND F >= 3   used to buy often, gone quiet
-    Hibernating         R <= 2 AND F <= 2   long gone, low engagement
-    These thresholds are a business choice, not a universal standard. Change
-    them here and in vw_customer_rfm (09) together.
-
-    Monetary is NOT in the segment rule. It is used to RANK customers inside
-    a segment, so a high-spend At Risk customer gets contacted first.
-
-OUT OF SCOPE
-    Customers with no qualifying order (never bought, or only cancelled) have
-    no R/F/M. They are counted in section 2 but not scored.
-===============================================================================
+Script  : 06_rfm_segmentation.sql
+Purpose : RFM customer segmentation and retention targets.
+          As-of date = day after the last qualifying order. R and M = quintiles; F = 1, 2, 3, 4, 5+ orders.
+          Keep segment rules in sync with vw_customer_rfm (09).
 */
 
 USE RetailAnalytics;
@@ -59,10 +10,7 @@ GO
 
 SET NOCOUNT ON;
 
--- =========================================
 -- 1. CUSTOMER RFM BASE
--- =========================================
-
 IF OBJECT_ID('tempdb..#rfm') IS NOT NULL DROP TABLE #rfm;
 
 DECLARE @AsOfDate DATE = (
@@ -72,7 +20,6 @@ DECLARE @AsOfDate DATE = (
 );
 
 ;WITH order_value AS (
-    -- Lines -> order grain first, so Monetary is not affected by joins.
     SELECT o.OrderID, o.CustomerID, CAST(o.OrderTimestamp AS DATE) AS OrderDate,
            SUM(i.LineTotal) AS NetSales
     FROM dbo.fact_orders o
@@ -94,7 +41,6 @@ customer_base AS (
 scored AS (
     SELECT
         cb.*,
-        -- Most recent customers (smallest RecencyDays) land in tile 5.
         NTILE(5) OVER (ORDER BY cb.RecencyDays DESC, cb.CustomerID) AS R_Score,
         CASE
             WHEN cb.Frequency >= 5 THEN 5
@@ -134,11 +80,7 @@ JOIN dbo.dim_customers c ON c.CustomerID = s.CustomerID;
 
 CREATE UNIQUE CLUSTERED INDEX CIX_rfm ON #rfm (CustomerID);
 
--- =========================================
 -- 2. SCOPE AND AS-OF DATE
--- =========================================
--- Shows exactly who is and is not scored, so totals reconcile to 05.
-
 SELECT
     (SELECT MAX(AsOfDate) FROM #rfm)                              AS AsOfDate,
     (SELECT MIN(FirstOrderDate) FROM #rfm)                        AS PeriodStart,
@@ -153,13 +95,7 @@ SELECT
         AND NOT EXISTS (SELECT 1 FROM #rfm r WHERE r.CustomerID = c.CustomerID))
                                                                   AS OnlyCancelledOrders,
     (SELECT SUM(Monetary) FROM #rfm)                              AS TotalMonetary;  -- should equal NetSales in 05
-
--- =========================================
 -- 3. SCORE DISTRIBUTION (sanity check)
--- =========================================
--- R and M quintiles should hold ~20% each. F will NOT be even (fixed bands);
--- that is by design. The value ranges show what each score actually means.
-
 SELECT 'R' AS Dimension, R_Score AS Score, COUNT(*) AS Customers,
        MIN(RecencyDays) AS MinValue, MAX(RecencyDays) AS MaxValue
 FROM #rfm GROUP BY R_Score
@@ -171,12 +107,7 @@ SELECT 'M', M_Score, COUNT(*), MIN(Monetary), MAX(Monetary)
 FROM #rfm GROUP BY M_Score
 ORDER BY Dimension, Score;
 
--- =========================================
 -- 4. SEGMENT SUMMARY
--- =========================================
--- The headline table: how big each segment is and how much it is worth.
--- The gap between CustomerSharePct and RevenueSharePct is the story.
-
 SELECT
     Segment,
     COUNT(*)                                                           AS Customers,
@@ -191,11 +122,7 @@ FROM #rfm
 GROUP BY Segment
 ORDER BY Revenue DESC;
 
--- =========================================
 -- 5. CUSTOMER-LEVEL RFM (full list)
--- =========================================
--- One row per scored customer. Use for export or Power BI drill-through.
-
 SELECT
     CustomerID, CustomerName, Region, AcquisitionChannel, LoyaltyTier,
     FirstOrderDate, LastOrderDate, RecencyDays, Frequency, Monetary, AvgOrderValue,
@@ -205,12 +132,7 @@ SELECT
 FROM #rfm
 ORDER BY Monetary DESC;
 
--- =========================================
 -- 6. TOP 20 HIGH-VALUE CUSTOMERS
--- =========================================
--- Who the business can least afford to lose. Segment shows whether each
--- is still engaged (Champions) or slipping (At Risk / Hibernating).
-
 SELECT TOP (20)
     CustomerID, CustomerName, Region, LoyaltyTier, Segment, RFM_Code,
     Frequency, Monetary, LastOrderDate, RecencyDays,
@@ -218,15 +140,7 @@ SELECT TOP (20)
 FROM #rfm
 ORDER BY Monetary DESC;
 
--- =========================================
 -- 7. RETENTION OPPORTUNITIES
--- =========================================
--- Customers who were valuable but are going quiet. Prioritised by spend so
--- the campaign budget goes to the biggest revenue at risk first.
---   At Risk                 : frequent buyers who have stopped.
---   High-value Hibernating  : low frequency but top-quintile spend.
---   Need Attention (M >= 4) : big spenders drifting toward inactivity.
-
 SELECT TOP (100)
     CustomerID, CustomerName, Region, AcquisitionChannel, LoyaltyTier,
     Segment, RFM_Code, Frequency, Monetary, LastOrderDate, RecencyDays,
@@ -264,13 +178,7 @@ GROUP BY
     END
 ORDER BY HistoricRevenue DESC;
 
--- =========================================
 -- 8. SEGMENTS BY CUSTOMER ATTRIBUTES
--- =========================================
--- Does the loyalty programme line up with actual behaviour? If many
--- Platinum/Gold customers sit in At Risk or Hibernating, tier benefits are
--- not driving repeat purchase.
-
 SELECT
     LoyaltyTier,
     Segment,
@@ -282,7 +190,6 @@ GROUP BY LoyaltyTier, Segment
 ORDER BY LoyaltyTier, Customers DESC;
 
 -- 8b. Segment mix by acquisition channel: which channels produce loyal
--- customers rather than one-off buyers.
 SELECT
     AcquisitionChannel,
     COUNT(*)                                                                         AS Customers,

@@ -1,46 +1,7 @@
 /*
-===============================================================================
-Project     : Enterprise Retail Analytics
-Database    : RetailAnalytics
-DBMS        : Microsoft SQL Server
-Script      : 07_product_profitability.sql
-Purpose     : Which products and categories make money, how discounting
-              affects margin, and which stock positions need attention.
-Run after   : 06_rfm_segmentation.sql
-Output      : Category scorecard, product rankings, discount impact,
-              revenue concentration, inventory watch-list.
-===============================================================================
-
-DEFINITIONS (consistent with 05)
-    Scope           : order lines on qualifying orders (OrderStatus <> 'Cancelled').
-    Revenue         : SUM(LineTotal), net of discount.
-    Item margin     : SUM(ItemNetMargin) = revenue - Quantity * UnitCost.
-    Margin %        : item margin / revenue.
-    Avg selling price (ASP) : revenue / units. Below list price when discounted.
-    Prices and costs come from the ORDER LINE (price at time of sale), not
-    from dim_products, which holds the current price list only.
-
-    Freight and payment fees are order-level costs. They are deliberately NOT
-    allocated to products here: any split (by value, by units) would be an
-    assumption that changes the ranking. Product margin is therefore item
-    margin, before fulfilment costs.
-
-INVENTORY CAVEAT
-    StockOnHand and ReorderPoint are a single snapshot. There is no stock
-    movement history, so this script cannot say whether a product was out of
-    stock in the past, only where it stands now. Days of cover uses the last
-    90 days of sales as the demand rate.
-
-SECTIONS
-    0. Product-grain working table
-    1. Category scorecard
-    2. Top and bottom products
-    3. Discount impact on margin
-    4. Revenue concentration (Pareto)
-    5. Price band analysis
-    6. Inventory watch-list
-    7. Products never sold
-===============================================================================
+Script  : 07_product_profitability.sql
+Purpose : Product and category profitability, discounts and inventory.
+          Item margin only (freight and fees not allocated). Stock is a current snapshot.
 */
 
 USE RetailAnalytics;
@@ -48,12 +9,7 @@ GO
 
 SET NOCOUNT ON;
 
--- =========================================
 -- 0. PRODUCT-GRAIN WORKING TABLE
--- =========================================
--- One row per product, including products that never sold (LEFT JOIN) so
--- dead stock is visible rather than silently missing.
-
 IF OBJECT_ID('tempdb..#product_sales') IS NOT NULL DROP TABLE #product_sales;
 
 DECLARE @LastOrderDate DATE = (
@@ -101,12 +57,7 @@ LEFT JOIN (
 
 CREATE UNIQUE CLUSTERED INDEX CIX_product_sales ON #product_sales (ProductID);
 
--- =========================================
 -- 1. CATEGORY SCORECARD
--- =========================================
--- Revenue share vs margin share is the key comparison: a category whose
--- margin share is below its revenue share is diluting overall profitability.
-
 SELECT
     Category,
     COUNT(*)                                                         AS Products,
@@ -124,14 +75,7 @@ FROM #product_sales
 GROUP BY Category
 ORDER BY ItemMargin DESC;
 
--- =========================================
 -- 2. TOP AND BOTTOM PRODUCTS
--- =========================================
--- Ranked on item margin (absolute profit), not revenue: a high-revenue,
--- thin-margin product is less valuable than it looks.
--- Bottom list only includes products that sold at least 5 units, so a
--- single small sale does not label a product a "worst performer".
-
 -- 2a. Top 20 by item margin.
 SELECT TOP (20)
     RANK() OVER (ORDER BY ItemMargin DESC)                       AS MarginRank,
@@ -157,7 +101,6 @@ WHERE Units >= 5
 ORDER BY ItemMargin ASC;
 
 -- 2c. Lowest margin % (min 5 units). Different question from 2b: these
--- products may sell well but leave little on each sale; pricing candidates.
 SELECT TOP (20)
     ProductID, ProductName, Category,
     Units, Revenue, ItemMargin,
@@ -183,13 +126,7 @@ FROM ranked
 WHERE RankInCategory <= 3
 ORDER BY Category, RankInCategory;
 
--- =========================================
 -- 3. DISCOUNT IMPACT ON MARGIN
--- =========================================
--- Line-level, because the discount is decided per line. The question:
--- do discounts buy enough extra volume to pay for themselves?
--- Compare margin % and units per line across discount tiers.
-
 ;WITH lines AS (
     SELECT i.*, p.Category
     FROM dbo.fact_order_items i
@@ -207,8 +144,6 @@ SELECT
     SUM(LineTotal)                                                   AS Revenue,
     SUM(ItemNetMargin)                                               AS ItemMargin,
     CAST(100.0 * SUM(ItemNetMargin) / NULLIF(SUM(LineTotal), 0) AS DECIMAL(5,2)) AS MarginPct,
-    -- Margin that would have been earned at list price on the same lines.
-    -- The difference is exactly the discount: margin given away.
     CAST(100.0 * SUM(ItemNetMargin + DiscountAmount) / NULLIF(SUM(Quantity * UnitPrice), 0) AS DECIMAL(5,2)) AS MarginPctAtListPrice
 FROM lines
 GROUP BY DiscountRate
@@ -228,12 +163,7 @@ WHERE o.OrderStatus <> 'Cancelled'
 GROUP BY p.Category
 ORDER BY PctOfPotentialMarginGivenAway DESC;
 
--- =========================================
 -- 4. REVENUE CONCENTRATION (PARETO)
--- =========================================
--- What share of products produces 80% of revenue? High concentration means
--- the business depends on a few SKUs: protect their stock and pricing.
-
 ;WITH ordered AS (
     SELECT
         ProductID,
@@ -256,12 +186,7 @@ WHERE CumRevenue >= Threshold * TotalRevenue
 GROUP BY Threshold
 ORDER BY Threshold;
 
--- =========================================
 -- 5. PRICE BAND ANALYSIS
--- =========================================
--- Do expensive items carry better margins, and where does volume sit?
--- Banded on list price so each product sits in one band.
-
 ;WITH banded AS (
     SELECT *,
         CASE
@@ -284,20 +209,7 @@ FROM banded
 GROUP BY PriceBand
 ORDER BY PriceBand;
 
--- =========================================
 -- 6. INVENTORY WATCH-LIST
--- =========================================
--- Current stock against recent demand.
---   DailyDemand90d = units sold in the last 90 days / 90
---   DaysOfCover    = StockOnHand / DailyDemand90d
--- Status rules (first match wins):
---   Out of stock        : StockOnHand = 0
---   Reorder now         : StockOnHand <= ReorderPoint
---   Low cover           : fewer than 30 days of cover at current demand
---   No recent demand    : stock held but nothing sold in 90 days
---   Overstocked         : more than 365 days of cover
---   Healthy             : everything else
-
 IF OBJECT_ID('tempdb..#inventory') IS NOT NULL DROP TABLE #inventory;
 
 SELECT
@@ -331,7 +243,6 @@ GROUP BY StockStatus
 ORDER BY StockStatus;
 
 -- 6b. Action list: products needing replenishment, best sellers first
--- (a stock-out on a top seller costs the most).
 SELECT TOP (50)
     StockStatus, ProductID, ProductName, Category, SKU,
     StockOnHand, ReorderPoint, Units90d, DaysOfCover, Revenue
@@ -350,12 +261,7 @@ FROM #inventory
 GROUP BY Category
 ORDER BY SlowOrExcessValue DESC;
 
--- =========================================
 -- 7. PRODUCTS NEVER SOLD
--- =========================================
--- In the catalogue, never on a qualifying order. Candidates for delisting or
--- promotion; their stock is cash with no return.
-
 SELECT
     Category,
     COUNT(*)                         AS ProductsNeverSold,

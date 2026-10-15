@@ -1,54 +1,8 @@
 /*
-===============================================================================
-Project     : Enterprise Retail Analytics
-Database    : RetailAnalytics
-DBMS        : Microsoft SQL Server
-Script      : 05_sales_analysis.sql
-Purpose     : Overall commercial performance: volume, revenue, margin, trends,
-              and where sales come from (region, channel, shipping).
-Run after   : 04_data_quality_checks.sql
-Output      : Result sets for the executive dashboard (see section list).
-===============================================================================
-
-METRIC DEFINITIONS (used consistently in 05-09)
-    Qualifying order  : OrderStatus <> 'Cancelled'. Processing and Shipped
-                        orders are included: they are paid ('Success') and
-                        count as sales. Cancelled orders map 1:1 to voided
-                        payments (verified in 04).
-    Gross item sales  : SUM(Quantity * UnitPrice), list value before discount.
-    Discounts         : SUM(DiscountAmount).
-    Net sales         : SUM(LineTotal) = gross sales - discounts.
-                        Equals TotalAmountPaid for every order (verified in 04),
-                        so net sales = cash collected.
-    Item margin       : SUM(ItemNetMargin) = net sales - cost of goods.
-    Contribution      : item margin - FreightCost - ProcessingFee.
-                        Freight and fees are NOT charged to the customer
-                        (TotalAmountPaid excludes them), so they are costs.
-    AOV               : net sales / qualifying orders. The median is reported
-                        too because large orders skew the mean (see 04).
-
-    Refunds are NOT netted off here. 04 found orders whose refunds exceed the
-    order value, so "sales minus refunds" would be misleading. Returns are
-    analysed separately in 08.
-
-GRAIN DISCIPLINE
-    Freight and fees live on the order; revenue lives on the line. Section 0
-    rolls lines up to ORDER grain once, and every query below reads from that,
-    so order-level amounts are never multiplied by the number of lines.
-
-SECTIONS
-    0. Order-grain working table
-    1. Headline KPIs
-    2. Yearly performance
-    3. Quarterly trend
-    4. Monthly trend (MoM and YoY)
-    5. Best and worst months
-    6. Revenue by region
-    7. Revenue by acquisition channel
-    8. Order status distribution
-    9. Shipping method and freight cost
-   10. Day-of-week pattern
-===============================================================================
+Script  : 05_sales_analysis.sql
+Purpose : Sales KPIs, trends, region, channel and shipping.
+          Qualifying order = not Cancelled. Net sales = SUM(LineTotal).
+          Contribution = item margin - freight - processing fee. Refunds are not netted (see 08).
 */
 
 USE RetailAnalytics;
@@ -56,12 +10,7 @@ GO
 
 SET NOCOUNT ON;
 
--- =========================================
 -- 0. ORDER-GRAIN WORKING TABLE
--- =========================================
--- One row per order with line measures pre-aggregated. Built once so every
--- section shares identical logic.
-
 IF OBJECT_ID('tempdb..#orders') IS NOT NULL DROP TABLE #orders;
 
 SELECT
@@ -103,13 +52,7 @@ LEFT JOIN dbo.fact_payments p ON p.OrderID = o.OrderID;
 
 CREATE CLUSTERED INDEX CIX_orders ON #orders (OrderMonth, OrderID);
 
--- =========================================
 -- 1. HEADLINE KPIs
--- =========================================
--- The numbers that open the executive dashboard. All revenue figures are
--- for qualifying orders only; cancellations are shown so the exclusion is
--- visible, not hidden.
-
 SELECT
     MIN(OrderDate)                                                    AS PeriodStart,
     MAX(OrderDate)                                                    AS PeriodEnd,
@@ -139,18 +82,13 @@ SELECT
          / NULLIF(SUM(CASE WHEN IsQualifying = 1 THEN GrossSales END), 0) AS DECIMAL(5,2)) AS DiscountRatePct
 FROM #orders;
 
--- Median order value (separate query: PERCENTILE_CONT is a window function).
 SELECT DISTINCT
     CAST(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY NetSales) OVER () AS DECIMAL(12,2)) AS MedianOrderValue,
     CAST(PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY NetSales) OVER () AS DECIMAL(12,2)) AS P90OrderValue
 FROM #orders
 WHERE IsQualifying = 1;
 
--- =========================================
 -- 2. YEARLY PERFORMANCE
--- =========================================
--- Year-over-year view. Only compare full years; check PeriodStart/End above.
-
 ;WITH yearly AS (
     SELECT
         YEAR(OrderDate)                         AS OrderYear,
@@ -176,11 +114,7 @@ SELECT
 FROM yearly
 ORDER BY OrderYear;
 
--- =========================================
 -- 3. QUARTERLY TREND
--- =========================================
--- QoQ shows momentum; YoY (LAG 4) removes seasonality.
-
 ;WITH quarterly AS (
     SELECT
         YEAR(OrderDate)                                  AS OrderYear,
@@ -204,13 +138,7 @@ SELECT
 FROM quarterly
 ORDER BY OrderYear, OrderQuarter;
 
--- =========================================
 -- 4. MONTHLY TREND
--- =========================================
--- The core trend line. Cancelled orders are kept as a separate column so a
--- spike in cancellations is visible next to the revenue it cost.
--- LAG(12) gives same-month-last-year; it is NULL for the first year.
-
 ;WITH monthly AS (
     SELECT
         OrderMonth,
@@ -243,12 +171,7 @@ SELECT
 FROM monthly
 ORDER BY OrderMonth;
 
--- =========================================
 -- 5. BEST AND WORST MONTHS
--- =========================================
--- Ranked on net sales. Partial months at either end of the data would rank
--- artificially low; the DaysWithOrders column exposes that.
-
 ;WITH monthly AS (
     SELECT
         OrderMonth,
@@ -277,12 +200,7 @@ FROM ranked
 WHERE BestRank <= 3 OR WorstRank <= 3
 ORDER BY NetSales DESC;
 
--- =========================================
 -- 6. REVENUE BY REGION
--- =========================================
--- Share of sales plus per-customer value: a region can be large because it
--- has many customers, or because each customer spends more. Both matter.
-
 SELECT
     Region,
     COUNT(*)                                                   AS QualifyingOrders,
@@ -298,14 +216,7 @@ WHERE IsQualifying = 1
 GROUP BY Region
 ORDER BY NetSales DESC;
 
--- =========================================
 -- 7. REVENUE BY ACQUISITION CHANNEL
--- =========================================
--- Which marketing channels bring customers who actually spend.
--- OrdersPerCustomer is a first read on repeat behaviour by channel.
--- CustomersAcquired counts everyone from the channel, including those who
--- never bought, so ConversionPct shows channel quality.
-
 ;WITH channel_customers AS (
     SELECT AcquisitionChannel, COUNT(*) AS CustomersAcquired
     FROM dbo.dim_customers
@@ -340,12 +251,7 @@ WHERE IsQualifying = 1
 GROUP BY Region, AcquisitionChannel
 ORDER BY Region, NetSales DESC;
 
--- =========================================
 -- 8. ORDER STATUS DISTRIBUTION
--- =========================================
--- All orders, including cancelled. OrderValue on the Cancelled row = sales lost.
--- 'Processing' share is a fulfilment backlog indicator.
-
 SELECT
     OrderStatus,
     COUNT(*)                                                         AS Orders,
@@ -357,13 +263,7 @@ FROM #orders
 GROUP BY OrderStatus
 ORDER BY Orders DESC;
 
--- =========================================
 -- 9. SHIPPING METHOD AND FREIGHT COST
--- =========================================
--- Freight is absorbed by the business, so FreightPctOfSales is a direct hit
--- to contribution. High-percentage methods are candidates for a shipping
--- charge or a free-shipping threshold.
-
 SELECT
     ShippingMethod,
     COUNT(*)                                                         AS QualifyingOrders,
@@ -405,12 +305,7 @@ FROM banded
 GROUP BY OrderValueBand
 ORDER BY OrderValueBand;
 
--- =========================================
 -- 10. DAY-OF-WEEK PATTERN
--- =========================================
--- Useful for campaign timing and staffing. DATENAME depends on the session
--- language; DATEPART(WEEKDAY) depends on DATEFIRST, so sort by a fixed key.
-
 SELECT
     DATENAME(WEEKDAY, OrderDate)                                   AS DayOfWeek,
     COUNT(*)                                                       AS QualifyingOrders,
@@ -421,6 +316,5 @@ FROM #orders
 WHERE IsQualifying = 1
 GROUP BY DATENAME(WEEKDAY, OrderDate), (DATEDIFF(DAY, '19000101', OrderDate) % 7)
 ORDER BY (DATEDIFF(DAY, '19000101', OrderDate) % 7);   -- 0 = Monday
-
 DROP TABLE #orders;
 GO

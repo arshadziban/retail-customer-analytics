@@ -14,7 +14,7 @@ retail-customer-analytics/
 │   ├── fact_payments.csv                 20,000 payments (one per order)
 │   └── fact_returns.csv                  10,000 return records
 └── sql/
-    ├── 00_run_all.sql                    Runs 01-09 in order (SQLCMD mode)
+    ├── 00_run_all.sql                    Runs 01-10 in order (SQLCMD mode)
     │
     │   Setup
     ├── 01_create_tables_with_keys.sql    Database, tables, keys, constraints, indexes
@@ -31,7 +31,8 @@ retail-customer-analytics/
     ├── 08_payments_and_returns.sql       Payment methods and fees, return rates and reasons
     │
     │   Reporting layer
-    └── 09_create_analytical_views.sql    Views for Power BI
+    ├── 09_create_analytical_views.sql    Summary views (one per analysis topic)
+    └── 10_create_powerbi_model_views.sql Star-schema views for the Power BI model
 ```
 
 ## Data model
@@ -52,7 +53,7 @@ The `dataset/` folder is not in the repository (it is listed in `.gitignore`). P
    - **SSMS:** open `00_run_all.sql`, turn on **Query → SQLCMD Mode**, and execute it. Without SQLCMD Mode, the `:r` lines fail with `Incorrect syntax near ':'`.
    - **Command line:** `sqlcmd -S localhost -E -C -b -i "<path>\sql\00_run_all.sql"`
 3. Check that `03_validate_keys_and_rows.sql` reports `PASS`, and read the HIGH items in `04_data_quality_checks.sql` before using the numbers.
-4. Connect Power BI to the `vw_*` views.
+4. Connect Power BI to the six `pbi_*` views and create the relationships listed in [Power BI model](#power-bi-model).
 
 You can re-run everything safely. Script `01` skips tables that already exist, `02` skips tables that already contain rows, and `09` replaces the views. To rebuild from scratch, drop the database first.
 
@@ -69,7 +70,33 @@ Scripts 05-09 all use these rules.
 | Order return rate | Delivered orders with at least one return ÷ delivered orders |
 | Refund (capped) | Refunds per order, capped at the order's net value |
 
-## Views
+## Power BI model
+
+Load **only** the `pbi_*` views from script 10. They form a star schema:
+
+```
+              pbi_dim_date
+            /      |       \
+ pbi_fact_orders  pbi_fact_order_lines  pbi_fact_returns ── (all three) ── pbi_dim_customer
+                          |
+                   pbi_dim_product
+```
+
+| From (one side) | To (many side) |
+|---|---|
+| `pbi_dim_date[Date]` | `pbi_fact_orders[OrderDate]` |
+| `pbi_dim_date[Date]` | `pbi_fact_order_lines[OrderDate]` |
+| `pbi_dim_date[Date]` | `pbi_fact_returns[ReturnDate]` |
+| `pbi_dim_customer[CustomerID]` | `pbi_fact_orders[CustomerID]` |
+| `pbi_dim_customer[CustomerID]` | `pbi_fact_order_lines[CustomerID]` |
+| `pbi_dim_customer[CustomerID]` | `pbi_fact_returns[CustomerID]` |
+| `pbi_dim_product[ProductID]` | `pbi_fact_order_lines[ProductID]` |
+
+Every relationship is one-to-many with a single filter direction. Do not relate the fact views to each other on `OrderID`. They connect through the shared dimensions.
+
+## Summary views
+
+The `vw_*` views from script 09 are pre-aggregated, one per analysis topic. They share no keys, so they cannot be joined into a Power BI model. Use them for SQL queries or for single-table report pages.
 
 | View | One row per | Use |
 |---|---|---|

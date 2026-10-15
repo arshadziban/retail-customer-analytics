@@ -1,35 +1,10 @@
 /*
-===============================================================================
-Project     : Enterprise Retail Analytics
-Database    : RetailAnalytics
-DBMS        : Microsoft SQL Server
-Script      : 00_run_all.sql
-Purpose     : Build the whole project end to end, in the correct order.
-===============================================================================
-
-HOW TO RUN
-    This script uses SQLCMD commands (:setvar, :r, :on error), which plain
-    T-SQL does not understand. Without SQLCMD mode every one of those lines
-    fails with "Incorrect syntax near ':'".
-
-    SSMS        : 1. Query menu -> SQLCMD Mode (toggle it ON for this tab)
-                  2. Check SqlDir below points at this sql folder
-                  3. Execute
-    Command line: sqlcmd -S localhost -E -C -b -i "<path>\00_run_all.sql"
-
-    SqlDir must be an ABSOLUTE path. A relative path (".") is resolved from
-    the SSMS / sqlcmd working directory, not from where this file lives.
-
-SAFE TO RE-RUN
-    01 skips tables/indexes that exist, 02 skips tables that already have
-    rows, 03-08 are read-only, and 09 uses CREATE OR ALTER. Running this on
-    an already-loaded database just refreshes the reports and views.
-    :on error exit stops at the first failing script.
-===============================================================================
+Script  : 00_run_all.sql
+Purpose : Run all scripts (01-10) in order.
+          SSMS: turn on Query > SQLCMD Mode first.
+          Set SqlDir to the full path of this folder. Safe to re-run.
 */
 
--- Guard: if SQLCMD mode is off, stop here with a clear message instead of a
--- wall of syntax errors further down.
 :setvar SqlCmdEnabled "True"
 GO
 IF N'$(SqlCmdEnabled)' <> N'True'
@@ -77,6 +52,10 @@ GO
 PRINT '== 09 Create analytical views';
 GO
 :r $(SqlDir)\09_create_analytical_views.sql
+
+PRINT '== 10 Create Power BI model views';
+GO
+:r $(SqlDir)\10_create_powerbi_model_views.sql
 
 PRINT '== Done';
 GO
