@@ -1,6 +1,6 @@
 # =============================================================================
 # retail-customer-analytics
-# Tracked on purpose: sql/*.sql, README.md.
+# Tracked on purpose: sql/*.sql, powerbi/bi_report.pbix, README.md.
 # =============================================================================
 
 # ---- Data -------------------------------------------------------------------
@@ -30,8 +30,7 @@ obj/
 output/
 
 # ---- Power BI ---------------------------------------------------------------
-# Report files are kept locally, not in git; also ignore local cache and settings.
-*.pbix
+# The report (powerbi/bi_report.pbix) is tracked; ignore backups, local cache and settings.
 *.pbix.bak
 **/.pbi/localSettings.json
 **/.pbi/cache.abf
